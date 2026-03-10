@@ -3,12 +3,18 @@ package com.hedera.node.app.service.token;
 
 import static java.util.Comparator.comparingLong;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toMap;
 
 import com.hedera.hapi.node.base.AccountID;
+import com.hedera.hapi.node.state.token.NodeActivity;
+import com.hedera.hapi.node.state.token.NodeRewards;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Represents a grouping of reward-eligible nodes categorized into active and inactive groups
@@ -99,7 +105,30 @@ public record NodeRewardGroups(
      */
     public List<AccountID> inactiveNodeAccountIds() {
         return inactiveNodeActivities.stream()
+                .map(NodeRewardActivity::nodeId)
+                .collect(toCollection(HashSet::new));
+    }
+
+    /**
+     * Returns the set of active node account IDs.
+     *
+     * @return the set of active node account IDs.
+     */
+    public Set<AccountID> activeNodeAccountIds() {
+        return activeNodeActivities.stream()
                 .map(NodeRewardActivity::accountId)
                 .toList();
     }
+
+    /**
+     * Returns the set of inactive node account IDs.
+     *
+     * @return the set of inactive node account IDs.
+     */
+    public Set<AccountID> inactiveNodeAccountIds() {
+        return inactiveNodeActivities.stream()
+                .map(NodeRewardActivity::accountId)
+                .collect(toCollection(HashSet::new));
+    }
+
 }
