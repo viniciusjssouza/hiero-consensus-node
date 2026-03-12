@@ -12,6 +12,8 @@ import static java.util.stream.Collectors.toMap;
 import static org.hiero.consensus.platformstate.V0540PlatformStateSchema.PLATFORM_STATE_STATE_ID;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.hedera.hapi.node.base.AccountID;
+import com.hedera.hapi.node.state.addressbook.RegisteredNode;
 import com.hedera.hapi.node.state.roster.RosterEntry;
 import com.hedera.hapi.node.state.token.NodeActivity;
 import com.hedera.hapi.node.state.token.NodeRewards;
@@ -19,6 +21,10 @@ import com.hedera.hapi.platform.state.JudgeId;
 import com.hedera.hapi.platform.state.PlatformState;
 import com.hedera.node.app.fees.ExchangeRateManager;
 import com.hedera.node.app.metrics.NodeMetrics;
+import com.hedera.node.app.service.addressbook.AddressBookService;
+import com.hedera.node.app.service.addressbook.ReadableRegisteredNodeStore;
+import com.hedera.node.app.service.addressbook.impl.ReadableNodeStoreImpl;
+import com.hedera.node.app.service.addressbook.impl.ReadableRegisteredNodeStoreImpl;
 import com.hedera.node.app.service.entityid.EntityIdFactory;
 import com.hedera.node.app.service.entityid.EntityIdService;
 import com.hedera.node.app.service.entityid.impl.ReadableEntityIdStoreImpl;
@@ -50,6 +56,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import javax.inject.Inject;
@@ -228,14 +235,14 @@ public class NodeRewardManager {
             final var nodeGroups = NodeRewardGroups.from(excludeNodesDecliningRewards(nodeActivities));
 
             // And pay whatever rewards the network can afford
-            final long rewardAccountBalance = getRewardAccountBalance(state, writableStates);
-            final long prePaidRewards = nodesConfig.adjustNodeFees()
-                    ? nodeRewardStore.get().nodeFeesCollected() / currentRoster.size()
-                    : 0L;
+            final var budget = new RewardBudget(
+                    getRewardAccountBalance(state, writableStates),
+                    nodesConfig.adjustNodeFees()
+                            ? nodeRewardStore.get().nodeFeesCollected() / currentRoster.size()
+                            : 0L);
 
             // Calculate the reward amounts with budget constraints applied
-            final var rewardAmounts =
-                    calculateRewardAmounts(nodeGroups, rewardAccountBalance, nodesConfig, now, prePaidRewards);
+            final var rewardAmounts = calculateRewardAmounts(nodeGroups, budget, nodesConfig, now, state);
 
             // Dispatch the calculated rewards
             systemTransactions.dispatchNodeRewards(state, now, rewardAmounts);
@@ -393,19 +400,19 @@ public class NodeRewardManager {
      * including computing per-node amounts from configuration and applying budget constraints.
      *
      * @param nodeGroups the groups of active and inactive nodes
-     * @param rewardAccountBalance the available balance in the rewards account
+     * @param budget the reward budget containing the available balance and pre-paid rewards
      * @param nodesConfig the nodes configuration
      * @param now the current consensus time (used for exchange rate conversion)
-     * @param prePaidRewards the per-node amount already pre-paid via node fees
+     * @param state the current state (used to identify block-node-eligible nodes)
      * @return the calculated reward amounts ready for dispatch
      */
     @VisibleForTesting
     NodeRewardAmounts calculateRewardAmounts(
             @NonNull final NodeRewardGroups nodeGroups,
-            final long rewardAccountBalance,
+            @NonNull final RewardBudget budget,
             @NonNull final NodesConfig nodesConfig,
             @NonNull final Instant now,
-            final long prePaidRewards) {
+            @NonNull final State state) {
         final var payerId = rewardsAccountId();
         final long minNodeReward = computeMinNodeReward(nodesConfig, now);
         final var rewardAmounts = new NodeRewardAmounts(payerId);
@@ -418,10 +425,12 @@ public class NodeRewardManager {
 
         // Step 1: Add consensus rewards for active nodes (per-node amount computed inside)
         computeActiveConsensusNodeRewards(
-                nodeGroups.activeNodeActivities(), nodesConfig, now, prePaidRewards, minNodeReward, rewardAmounts);
+                nodeGroups.activeNodeActivities(), nodesConfig, now, budget.prePaidRewards(), minNodeReward, rewardAmounts);
 
-        // Step 2: Add block node rewards for active nodes (stub for HIP-1357)
-        computeActiveBlockNodeRewards(nodeGroups.activeNodeActivities(), rewardAmounts);
+        // Step 2: Add block node rewards for active nodes operating a Tier 1 block node (HIP-1357)
+        final var blockNodeEligibleNodeIds = findBlockNodeEligibleNodeIds(state, nodeGroups.activeNodeActivities());
+        computeActiveBlockNodeRewards(
+                nodeGroups.activeNodeActivities(), blockNodeEligibleNodeIds, nodesConfig, now, rewardAmounts);
 
         // Step 3: Add consensus rewards for inactive nodes (only if minimum reward > 0)
         if (minNodeReward > 0 && !inactiveAccounts.isEmpty()) {
@@ -433,7 +442,7 @@ public class NodeRewardManager {
         }
 
         // Step 4: Apply budget constraints
-        final var constrained = applyBudgetConstraints(rewardAmounts, rewardAccountBalance, payerId);
+        final var constrained = applyBudgetConstraints(rewardAmounts, budget.accountBalance(), payerId);
         log.info("Calculated rewards: {}", constrained);
         return constrained;
     }
@@ -469,18 +478,86 @@ public class NodeRewardManager {
     }
 
     /**
-     * Computes and adds block node rewards for active nodes.
-     * This is a stub for future HIP-1357 implementation.
+     * Computes and adds block node rewards for active nodes operating a Tier 1 block node (HIP-1357).
+     * Each eligible node receives the configured yearly block node reward divided by the number of periods per year,
+     * converted from USD to tinybars using the current exchange rate.
      *
      * @param activities the active node activities to reward
+     * @param blockNodeEligibleNodeIds the set of node IDs eligible for block node rewards
+     * @param nodesConfig the nodes configuration
+     * @param now the current consensus time (used for exchange rate conversion)
      * @param rewardAmounts the mutable reward amounts to update
      */
     @VisibleForTesting
     void computeActiveBlockNodeRewards(
-            @NonNull final Collection<NodeRewardActivity> activities, @NonNull final NodeRewardAmounts rewardAmounts) {
-        // Stub implementation for future HIP-1357
-        // Block node rewards will be calculated and added here
-        // For now, no block rewards are added
+            @NonNull final Collection<NodeRewardActivity> activities,
+            @NonNull final Set<Long> blockNodeEligibleNodeIds,
+            @NonNull final NodesConfig nodesConfig,
+            @NonNull final Instant now,
+            @NonNull final NodeRewardAmounts rewardAmounts) {
+        if (nodesConfig.targetYearlyBlockNodeRewardsUsd() <= 0 || blockNodeEligibleNodeIds.isEmpty()) {
+            return;
+        }
+        final var targetPayInTinycents = BigInteger.valueOf(nodesConfig.targetYearlyBlockNodeRewardsUsd())
+                .multiply(USD_TO_TINYCENTS.toBigInteger())
+                .divide(BigInteger.valueOf(nodesConfig.numPeriodsToTargetUsd()));
+        final long perNodeReward =
+                exchangeRateManager.getTinybarsFromTinycents(targetPayInTinycents.longValue(), now);
+        if (perNodeReward <= 0) {
+            return;
+        }
+        for (final var activity : activities) {
+            if (blockNodeEligibleNodeIds.contains(activity.nodeId())) {
+                rewardAmounts.addBlockNodeReward(activity.nodeId(), activity.accountId(), perNodeReward);
+            }
+        }
+    }
+
+    /**
+     * Identifies the set of active consensus node IDs that are eligible for block node rewards (HIP-1357).
+     * A consensus node is eligible if it has at least one associated registered block node that has not already
+     * been claimed by another consensus node. If the same registered block node is associated with multiple
+     * consensus nodes, only the first one encountered is eligible; a warning is logged for subsequent ones.
+     *
+     * @param state the current state
+     * @param activities the active node activities to check
+     * @return the set of node IDs eligible for block node rewards
+     */
+    @VisibleForTesting
+    Set<Long> findBlockNodeEligibleNodeIds(
+            @NonNull final State state, @NonNull final Collection<NodeRewardActivity> activities) {
+        final var addressBookStates = state.getReadableStates(AddressBookService.NAME);
+        final var entityCounters = new ReadableEntityIdStoreImpl(state.getReadableStates(EntityIdService.NAME));
+        final var nodeStore = new ReadableNodeStoreImpl(addressBookStates, entityCounters);
+        final var registeredNodeStore = new ReadableRegisteredNodeStoreImpl(addressBookStates);
+        final var eligibleNodeIds = new HashSet<Long>();
+        final var claimedBlockNodeIds = new HashSet<Long>();
+        for (final var activity : activities) {
+            final var node = nodeStore.get(activity.nodeId());
+            if (node == null) continue;
+            for (final long registeredNodeId : node.associatedRegisteredNode()) {
+                final var registeredNode = registeredNodeStore.get(registeredNodeId);
+                if (registeredNode == null || !isBlockNodeType(registeredNode)) continue;
+                if (!claimedBlockNodeIds.add(registeredNodeId)) {
+                    log.warn(
+                            "Registered block node {} is already claimed by another consensus node; "
+                                    + "consensus node {} will not receive block node rewards for it",
+                            registeredNodeId,
+                            activity.nodeId());
+                    continue;
+                }
+                eligibleNodeIds.add(activity.nodeId());
+                break;
+            }
+        }
+        return eligibleNodeIds;
+    }
+
+    /**
+     * Returns {@code true} if the given registered node has at least one Block Node service endpoint.
+     */
+    private static boolean isBlockNodeType(@NonNull final RegisteredNode registeredNode) {
+        return registeredNode.serviceEndpoint().stream().anyMatch(endpoint -> endpoint.hasBlockNode());
     }
 
     /**
@@ -617,4 +694,10 @@ public class NodeRewardManager {
     public SortedMap<Long, Long> getMissedJudgeCounts() {
         return missedJudgeCounts;
     }
+
+    /**
+     * Encapsulates the budget inputs for {@link #calculateRewardAmounts}: the available tinybar
+     * balance in the rewards account and the per-node amount already pre-paid via collected node fees.
+     */
+    record RewardBudget(long accountBalance, long prePaidRewards) {}
 }
