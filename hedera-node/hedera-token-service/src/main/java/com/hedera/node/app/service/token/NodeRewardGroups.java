@@ -3,18 +3,12 @@ package com.hedera.node.app.service.token;
 
 import static java.util.Comparator.comparingLong;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toMap;
 
 import com.hedera.hapi.node.base.AccountID;
-import com.hedera.hapi.node.state.token.NodeActivity;
-import com.hedera.hapi.node.state.token.NodeRewards;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Represents a grouping of reward-eligible nodes categorized into active and inactive groups
@@ -108,5 +102,4 @@ public record NodeRewardGroups(
                 .map(NodeRewardActivity::accountId)
                 .toList();
     }
-
 }

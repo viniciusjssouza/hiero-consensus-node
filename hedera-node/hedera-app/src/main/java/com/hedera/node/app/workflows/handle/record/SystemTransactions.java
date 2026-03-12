@@ -620,9 +620,7 @@ public class SystemTransactions {
      * @param rewardAmounts the pre-calculated reward amounts to dispatch
      */
     public void dispatchNodeRewards(
-            @NonNull final State state,
-            @NonNull final Instant now,
-            @NonNull final NodeRewardAmounts rewardAmounts) {
+            @NonNull final State state, @NonNull final Instant now, @NonNull final NodeRewardAmounts rewardAmounts) {
         requireNonNull(state);
         requireNonNull(now);
         requireNonNull(rewardAmounts);

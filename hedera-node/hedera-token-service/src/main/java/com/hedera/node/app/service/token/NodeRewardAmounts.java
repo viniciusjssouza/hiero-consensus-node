@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 package com.hedera.node.app.service.token;
 
+import static com.hedera.hapi.util.HapiUtils.ACCOUNT_ID_COMPARATOR;
 import static java.util.Objects.requireNonNull;
 
 import com.hedera.hapi.node.base.AccountAmount;
@@ -99,7 +101,8 @@ public class NodeRewardAmounts {
             return;
         }
 
-        nodeRewards.computeIfAbsent(nodeId, k -> new ArrayList<>())
+        nodeRewards
+                .computeIfAbsent(nodeId, k -> new ArrayList<>())
                 .add(new NodeRewardAmount(nodeId, accountId, amount, type, active));
     }
 
@@ -155,7 +158,9 @@ public class NodeRewardAmounts {
         }
 
         // Aggregate amounts per AccountID
-        final Map<AccountID, Long> aggregatedAmounts = new HashMap<>();
+        // Use a tree map to ensure order and determinism, so we guarantee all transactions
+        // will be processed at the same order in all nodes.
+        final Map<AccountID, Long> aggregatedAmounts = new TreeMap<>(ACCOUNT_ID_COMPARATOR);
 
         // Process all rewards
         for (var rewards : nodeRewards.values()) {
@@ -164,29 +169,26 @@ public class NodeRewardAmounts {
             }
         }
 
-        // Build the account amounts list
-        final var accountAmounts = new ArrayList<AccountAmount>();
-
-        // Add all credits
-        for (var entry : aggregatedAmounts.entrySet()) {
-            accountAmounts.add(AccountAmount.newBuilder()
-                    .accountID(entry.getKey())
-                    .amount(entry.getValue())
-                    .build());
-        }
-
         // Add payer debit (negative of total amount)
         final long total = totalAmount();
         if (total > 0) {
-            accountAmounts.add(AccountAmount.newBuilder()
-                    .accountID(payerId)
-                    .amount(-total)
-                    .build());
+            aggregatedAmounts.merge(payerId, -total, Long::sum);
         }
 
-        return TransferList.newBuilder()
-                .accountAmounts(accountAmounts)
-                .build();
+        // Build the account amounts list
+        final var accountAmounts = new ArrayList<AccountAmount>(aggregatedAmounts.size());
+
+        // Add all entries with non-zero amounts
+        for (var entry : aggregatedAmounts.entrySet()) {
+            if (entry.getValue() != 0) {
+                accountAmounts.add(AccountAmount.newBuilder()
+                        .accountID(entry.getKey())
+                        .amount(entry.getValue())
+                        .build());
+            }
+        }
+
+        return TransferList.newBuilder().accountAmounts(accountAmounts).build();
     }
 
     /**
@@ -195,15 +197,31 @@ public class NodeRewardAmounts {
      * @return a new NodeRewardAmounts instance with only active rewards
      */
     public NodeRewardAmounts onlyActiveNodeRewards() {
-        final var activeOnly = new NodeRewardAmounts(payerId);
+        return withCappedInactiveRewards(0);
+    }
+
+    /**
+     * Creates a copy of this NodeRewardAmounts keeping all active rewards and capping
+     * the total inactive rewards at the given budget. The budget is divided equally
+     * among inactive nodes; if the budget is zero, inactive rewards are dropped entirely.
+     *
+     * @param inactiveBudget the maximum total amount available for inactive rewards
+     * @return a new NodeRewardAmounts with active rewards unchanged and inactive rewards capped
+     */
+    public NodeRewardAmounts withCappedInactiveRewards(final long inactiveBudget) {
+        final var result = new NodeRewardAmounts(payerId);
+        final int inactiveCount = inactiveNodeCount();
+        final long perInactiveNode = (inactiveBudget > 0 && inactiveCount > 0) ? inactiveBudget / inactiveCount : 0;
         for (var entry : nodeRewards.entrySet()) {
             for (var reward : entry.getValue()) {
                 if (reward.active()) {
-                    activeOnly.addReward(reward.nodeId(), reward.accountId(), reward.amount(), reward.type(), true);
+                    result.addReward(reward.nodeId(), reward.accountId(), reward.amount(), reward.type(), true);
+                } else if (perInactiveNode > 0) {
+                    result.addReward(reward.nodeId(), reward.accountId(), perInactiveNode, reward.type(), false);
                 }
             }
         }
-        return activeOnly;
+        return result;
     }
 
     /**
@@ -283,7 +301,9 @@ public class NodeRewardAmounts {
             if (isActive) {
                 activeGroups.computeIfAbsent(breakdown, k -> new ArrayList<>()).add(nodeId);
             } else {
-                inactiveGroups.computeIfAbsent(breakdown, k -> new ArrayList<>()).add(nodeId);
+                inactiveGroups
+                        .computeIfAbsent(breakdown, k -> new ArrayList<>())
+                        .add(nodeId);
             }
         }
 
@@ -310,7 +330,8 @@ public class NodeRewardAmounts {
             sb.append("\n    Nodes").append(group.getValue()).append(":");
             // TreeMap gives deterministic enum-declaration order (CONSENSUS_NODE before BLOCK_NODE)
             new TreeMap<>(group.getKey())
-                    .forEach((type, amount) -> sb.append(" ").append(type).append("=").append(amount));
+                    .forEach((type, amount) ->
+                            sb.append(" ").append(type).append("=").append(amount));
         }
         sb.append("\n  ]");
     }

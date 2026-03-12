@@ -10,10 +10,10 @@ import com.hedera.hapi.node.base.AccountID;
 import com.hedera.hapi.node.base.SemanticVersion;
 import com.hedera.hapi.node.base.TransferList;
 import com.hedera.hapi.node.state.token.NodeRewards;
-import com.hedera.node.app.service.token.NodeRewardAmounts;
-import com.hedera.node.app.service.token.NodeRewardGroups;
 import com.hedera.hapi.node.token.CryptoTransferTransactionBody;
 import com.hedera.hapi.platform.state.SingletonType;
+import com.hedera.node.app.service.token.NodeRewardAmounts;
+import com.hedera.node.app.service.token.NodeRewardGroups;
 import com.hedera.node.app.service.token.TokenService;
 import com.hedera.node.app.spi.workflows.SystemContext;
 import com.swirlds.state.lifecycle.Schema;
@@ -50,8 +50,7 @@ public class V0610TokenSchema extends Schema<SemanticVersion> {
      * @param rewardAmounts The pre-calculated node reward amounts.
      */
     public static void dispatchSynthNodeRewards(
-            @NonNull final SystemContext systemContext,
-            @NonNull final NodeRewardAmounts rewardAmounts) {
+            @NonNull final SystemContext systemContext, @NonNull final NodeRewardAmounts rewardAmounts) {
         final var transferList = rewardAmounts.toTransferList();
         if (transferList.accountAmounts().isEmpty()) {
             return;

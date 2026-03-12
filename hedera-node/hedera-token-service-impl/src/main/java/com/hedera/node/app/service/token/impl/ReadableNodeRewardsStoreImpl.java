@@ -33,5 +33,4 @@ public class ReadableNodeRewardsStoreImpl implements ReadableNodeRewardsStore {
     public NodeRewards get() {
         return requireNonNull(nodeRewardsState.get());
     }
-
 }

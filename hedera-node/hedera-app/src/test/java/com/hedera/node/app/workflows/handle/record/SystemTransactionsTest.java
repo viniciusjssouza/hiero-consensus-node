@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
@@ -34,9 +35,7 @@ import com.hedera.node.app.service.entityid.EntityIdFactory;
 import com.hedera.node.app.service.file.FileService;
 import com.hedera.node.app.service.file.impl.FileServiceImpl;
 import com.hedera.node.app.service.file.impl.schemas.V0490FileSchema;
-import com.hedera.node.app.service.token.NodeRewardActivity;
 import com.hedera.node.app.service.token.NodeRewardAmounts;
-import com.hedera.node.app.service.token.NodeRewardGroups;
 import com.hedera.node.app.services.ServicesRegistry;
 import com.hedera.node.app.spi.AppContext;
 import com.hedera.node.app.spi.info.NetworkInfo;
@@ -59,13 +58,11 @@ import com.swirlds.state.spi.ReadableStates;
 import com.swirlds.state.spi.WritableSingletonState;
 import com.swirlds.state.spi.WritableSingletonStateBase;
 import com.swirlds.state.spi.WritableStates;
-import edu.umd.cs.findbugs.annotations.NonNull;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -298,31 +295,26 @@ class SystemTransactionsTest {
     void testDispatchNodeRewardsWithNullState() {
         final var rewardAmounts = new NodeRewardAmounts(PAYER_ID);
 
-        assertThrows(
-                NullPointerException.class,
-                () -> subject.dispatchNodeRewards(null, NOW, rewardAmounts));
+        assertThrows(NullPointerException.class, () -> subject.dispatchNodeRewards(null, NOW, rewardAmounts));
     }
 
     @Test
     void testDispatchNodeRewardsWithNullNow() {
         final var rewardAmounts = new NodeRewardAmounts(PAYER_ID);
 
-        assertThrows(
-                NullPointerException.class,
-                () -> subject.dispatchNodeRewards(state, null, rewardAmounts));
+        assertThrows(NullPointerException.class, () -> subject.dispatchNodeRewards(state, null, rewardAmounts));
     }
 
     @Test
     void testDispatchNodeRewardsWithNullRewardAmounts() {
-        assertThrows(
-                NullPointerException.class,
-                () -> subject.dispatchNodeRewards(state, NOW, null));
+        assertThrows(NullPointerException.class, () -> subject.dispatchNodeRewards(state, NOW, null));
     }
 
     @Test
     void testDispatchNodeRewardsSuccess() {
         final var rewardAmounts = new NodeRewardAmounts(PAYER_ID);
-        rewardAmounts.addConsensusNodeReward(3L, AccountID.newBuilder().accountNum(3L).build(), 100L);
+        rewardAmounts.addConsensusNodeReward(
+                3L, AccountID.newBuilder().accountNum(3L).build(), 100L);
 
         final var mockSystemContext = mock(SystemContext.class);
         final var spySubject = spy(subject);

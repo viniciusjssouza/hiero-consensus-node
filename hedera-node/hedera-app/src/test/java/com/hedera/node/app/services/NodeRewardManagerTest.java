@@ -240,8 +240,7 @@ class NodeRewardManagerTest {
                 configProvider, entityIdFactory, exchangeRateManager, networkInfo, new NodeMetrics(new NoOpMetrics()));
 
         nodeRewardManager.maybeRewardActiveNodes(state, Instant.now(), systemTransactions);
-        verify(systemTransactions, never())
-                .dispatchNodeRewards(any(), any(), any());
+        verify(systemTransactions, never()).dispatchNodeRewards(any(), any(), any());
     }
 
     @Test
@@ -250,8 +249,7 @@ class NodeRewardManagerTest {
         nodeRewardManager = new NodeRewardManager(
                 configProvider, entityIdFactory, exchangeRateManager, networkInfo, new NodeMetrics(new NoOpMetrics()));
         nodeRewardManager.maybeRewardActiveNodes(state, NOW_MINUS_600, systemTransactions);
-        verify(systemTransactions, never())
-                .dispatchNodeRewards(any(), any(), any());
+        verify(systemTransactions, never()).dispatchNodeRewards(any(), any(), any());
     }
 
     @Test
@@ -270,7 +268,7 @@ class NodeRewardManagerTest {
 
         nodeRewardManager.maybeRewardActiveNodes(state, NOW, systemTransactions);
 
-        verify(systemTransactions).dispatchNodeRewards(any(), any(), any(), anyLong(), any(), anyLong(), anyLong());
+        verify(systemTransactions).dispatchNodeRewards(any(), any(), any());
     }
 
     @Test
@@ -519,8 +517,7 @@ class NodeRewardManagerTest {
         assertTrue(result1, "First reward after multi-day outage should succeed");
 
         // Verify rewards were dispatched exactly once
-        verify(systemTransactions, times(1))
-                .dispatchNodeRewards(any(), any(), any());
+        verify(systemTransactions, times(1)).dispatchNodeRewards(any(), any(), any());
 
         // The lastNodeRewardPaymentsTime should now be updated to NOW
         // So a second call in the same period should NOT reward again
@@ -528,8 +525,7 @@ class NodeRewardManagerTest {
         assertFalse(result2, "Second reward in same period should not happen");
 
         // Still only one dispatch
-        verify(systemTransactions, times(1))
-                .dispatchNodeRewards(any(), any(), any());
+        verify(systemTransactions, times(1)).dispatchNodeRewards(any(), any(), any());
     }
 
     /** Stubs networkInfo to return a node with the given account ID (used by buildNodeActivities). */
@@ -573,8 +569,10 @@ class NodeRewardManagerTest {
     }
 
     @Test
-    void testCalculateRewardAmountsBudgetSufficientForActiveOnly() {
-        // Given: 2 active nodes at 100 each, 1 inactive at 10, balance = 200 (active fits, inactive dropped)
+    void testCalculateRewardAmountsBudgetExactlyActiveTotal() {
+        // Given: 2 active nodes at 100 each, 1 inactive at 10, balance = 200 (== activeTotal)
+        // balance == activeTotal → Case 3 (balance not strictly greater than activeTotal),
+        // so active nodes get 200/2 = 100 each, inactive dropped
         final var nodeGroups = createTestNodeGroups(2, 1);
         givenExchangeRates(MIN_REWARD, TARGET_REWARD);
         final var nodesConfig = configProvider.getConfiguration().getConfigData(NodesConfig.class);
@@ -585,6 +583,53 @@ class NodeRewardManagerTest {
         assertThat(result.inactiveTotalAmount()).isEqualTo(0L); // dropped
         assertThat(result.totalAmount()).isEqualTo(200L);
         assertRewardAmountForNodes(List.of(1L, 2L), result, 100L);
+    }
+
+    @Test
+    void testCalculateRewardAmountsBudgetActiveTotalPlusOne() {
+        // Given: 2 active at 100 each (total=200), 1 inactive at 10, balance = 201 (== activeTotal + 1)
+        // balance > activeTotal → Case 2: remainder = 1, inactive gets 1/1 = 1
+        final var nodeGroups = createTestNodeGroups(2, 1);
+        givenExchangeRates(MIN_REWARD, TARGET_REWARD);
+        final var nodesConfig = configProvider.getConfiguration().getConfigData(NodesConfig.class);
+
+        final var result = nodeRewardManager.calculateRewardAmounts(nodeGroups, 201L, nodesConfig, NOW, 0L);
+
+        assertThat(result.activeTotalAmount()).isEqualTo(200L);
+        assertThat(result.inactiveTotalAmount()).isEqualTo(1L); // min(1, 10) / 1 = 1
+        assertThat(result.totalAmount()).isEqualTo(201L);
+        assertRewardAmountForNodes(List.of(1L, 2L), result, 100L);
+        assertRewardAmountForNodes(List.of(3L), result, 1L);
+    }
+
+    @Test
+    void testCalculateRewardAmountsBudgetTooSmallToPayAnyone() {
+        // Given: 3 active nodes at 100 each, balance = 2 → Case 3: 2/3 = 0 per node → empty result
+        final var nodeGroups = createTestNodeGroups(3, 0);
+        givenExchangeRates(MIN_REWARD, TARGET_REWARD);
+        final var nodesConfig = configProvider.getConfiguration().getConfigData(NodesConfig.class);
+
+        final var result = nodeRewardManager.calculateRewardAmounts(nodeGroups, 2L, nodesConfig, NOW, 0L);
+
+        assertThat(result.isEmpty()).isTrue();
+        assertThat(result.totalAmount()).isEqualTo(0L);
+    }
+
+    @Test
+    void testCalculateRewardAmountsBudgetPartiallyFundsInactive() {
+        // Given: 2 active at 100 each (total=200), 2 inactive at 10 each (total=20), balance=210
+        // balance > activeTotal (210 > 200) → Case 2: remainder = 10, each inactive gets 10/2=5
+        final var nodeGroups = createTestNodeGroups(2, 2);
+        givenExchangeRates(MIN_REWARD, TARGET_REWARD);
+        final var nodesConfig = configProvider.getConfiguration().getConfigData(NodesConfig.class);
+
+        final var result = nodeRewardManager.calculateRewardAmounts(nodeGroups, 210L, nodesConfig, NOW, 0L);
+
+        assertThat(result.activeTotalAmount()).isEqualTo(200L);
+        assertThat(result.inactiveTotalAmount()).isEqualTo(10L); // 2 * 5
+        assertThat(result.totalAmount()).isEqualTo(210L);
+        assertRewardAmountForNodes(List.of(1L, 2L), result, 100L);
+        assertRewardAmountForNodes(List.of(3L, 4L), result, 5L);
     }
 
     @Test
@@ -604,7 +649,7 @@ class NodeRewardManagerTest {
 
     @Test
     void testCalculateRewardAmountsNoActiveNodes() {
-        // Given: Only inactive nodes at 10 each, balance = 100
+        // Given: Only inactive nodes at 10 each, balance = 100 (sufficient)
         final var nodeGroups = createTestNodeGroups(0, 2);
         givenExchangeRates(MIN_REWARD, TARGET_REWARD);
         final var nodesConfig = configProvider.getConfiguration().getConfigData(NodesConfig.class);
@@ -616,6 +661,21 @@ class NodeRewardManagerTest {
         assertThat(result.inactiveTotalAmount()).isEqualTo(20L); // 2 * 10
         assertThat(result.totalAmount()).isEqualTo(20L);
         assertRewardAmountForNodes(List.of(1L, 2L), result, 10L); // inactive nodes 1 and 2
+    }
+
+    @Test
+    void testCalculateRewardAmountsNoActiveNodesInsufficientBalance() {
+        // Given: 3 inactive at 10 each (total=30), balance=20 → Case 4: 20/3=6 each
+        final var nodeGroups = createTestNodeGroups(0, 3);
+        givenExchangeRates(MIN_REWARD, TARGET_REWARD);
+        final var nodesConfig = configProvider.getConfiguration().getConfigData(NodesConfig.class);
+
+        final var result = nodeRewardManager.calculateRewardAmounts(nodeGroups, 20L, nodesConfig, NOW, 0L);
+
+        assertThat(result.isEmpty()).isFalse();
+        assertThat(result.activeTotalAmount()).isEqualTo(0L);
+        assertThat(result.inactiveTotalAmount()).isEqualTo(18L); // 3 * 6
+        assertRewardAmountForNodes(List.of(1L, 2L, 3L), result, 6L);
     }
 
     @Test
@@ -690,7 +750,8 @@ class NodeRewardManagerTest {
             final List<Long> nodeIds, final NodeRewardAmounts amounts, final long expectedAmount) {
         final var transferList = amounts.toTransferList();
         for (final long nodeId : nodeIds) {
-            final var nodeAccount = AccountID.newBuilder().accountNum(1000L + nodeId).build();
+            final var nodeAccount =
+                    AccountID.newBuilder().accountNum(1000L + nodeId).build();
             final long actual = transferList.accountAmounts().stream()
                     .filter(aa -> aa.accountID().equals(nodeAccount))
                     .mapToLong(AccountAmount::amount)
@@ -717,24 +778,23 @@ class NodeRewardManagerTest {
 
         for (int i = 0; i < activeCount; i++) {
             final var nodeId = (long) (i + 1);
-            final var accountId = AccountID.newBuilder()
-                    .accountNum(1000L + nodeId)
-                    .build();
+            final var accountId =
+                    AccountID.newBuilder().accountNum(1000L + nodeId).build();
             activeActivities.add(new NodeRewardActivity(nodeId, accountId, 0, 100, 33));
         }
 
         for (int i = 0; i < inactiveCount; i++) {
             final var nodeId = (long) (activeCount + i + 1);
-            final var accountId = AccountID.newBuilder()
-                    .accountNum(1000L + nodeId)
-                    .build();
+            final var accountId =
+                    AccountID.newBuilder().accountNum(1000L + nodeId).build();
             inactiveActivities.add(new NodeRewardActivity(nodeId, accountId, 70, 100, 33));
         }
 
-        return NodeRewardGroups.from(
-                new ArrayList<NodeRewardActivity>() {{
-                    addAll(activeActivities);
-                    addAll(inactiveActivities);
-                }});
+        return NodeRewardGroups.from(new ArrayList<NodeRewardActivity>() {
+            {
+                addAll(activeActivities);
+                addAll(inactiveActivities);
+            }
+        });
     }
 }

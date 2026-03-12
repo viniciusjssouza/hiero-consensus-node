@@ -24,6 +24,7 @@ import com.hedera.node.app.service.entityid.EntityIdService;
 import com.hedera.node.app.service.entityid.impl.ReadableEntityIdStoreImpl;
 import com.hedera.node.app.service.roster.RosterService;
 import com.hedera.node.app.service.token.NodeRewardActivity;
+import com.hedera.node.app.service.token.NodeRewardAmounts;
 import com.hedera.node.app.service.token.NodeRewardGroups;
 import com.hedera.node.app.service.token.TokenService;
 import com.hedera.node.app.service.token.impl.ReadableAccountStoreImpl;
@@ -233,8 +234,8 @@ public class NodeRewardManager {
                     : 0L;
 
             // Calculate the reward amounts with budget constraints applied
-            final var rewardAmounts = calculateRewardAmounts(
-                    nodeGroups, rewardAccountBalance, nodesConfig, now, prePaidRewards);
+            final var rewardAmounts =
+                    calculateRewardAmounts(nodeGroups, rewardAccountBalance, nodesConfig, now, prePaidRewards);
 
             // Dispatch the calculated rewards
             systemTransactions.dispatchNodeRewards(state, now, rewardAmounts);
@@ -259,7 +260,6 @@ public class NodeRewardManager {
         nodeRewardStore.resetForNewStakingPeriod();
         resetNodeRewards();
     }
-
 
     private static @NonNull List<RosterEntry> getRosterEntries(@NonNull State state) {
         final var rosterStore = new ReadableRosterStoreImpl(state.getReadableStates(RosterService.NAME));
@@ -477,8 +477,7 @@ public class NodeRewardManager {
      */
     @VisibleForTesting
     void computeActiveBlockNodeRewards(
-            @NonNull final Collection<NodeRewardActivity> activities,
-            @NonNull final NodeRewardAmounts rewardAmounts) {
+            @NonNull final Collection<NodeRewardActivity> activities, @NonNull final NodeRewardAmounts rewardAmounts) {
         // Stub implementation for future HIP-1357
         // Block node rewards will be calculated and added here
         // For now, no block rewards are added
@@ -516,9 +515,10 @@ public class NodeRewardManager {
      * If the total desired rewards exceed the available balance, this method
      * adjusts the amounts according to the following priority:
      * 1. If balance >= activeTotal + inactiveTotal: keep all amounts
-     * 2. If balance >= activeTotal but not enough for inactive: keep active, drop inactive
-     * 3. If balance < activeTotal: divide balance equally among active nodes, drop inactive
-     * 4. If no active nodes: return empty rewards
+     * 2. If balance > activeTotal: keep active, partially fund inactive with the remainder
+     * 3. If balance <= activeTotal: divide balance equally among active nodes, drop inactive
+     * 4. When there are no active nodes, inactive nodes are treated as the sole recipients
+     * and the budget is divided equally among them, using the minimal rewards.
      *
      * @param desiredAmounts the desired reward amounts
      * @param availableBalance the available balance in the rewards account
@@ -539,26 +539,28 @@ public class NodeRewardManager {
             return desiredAmounts;
         }
 
-        // Case 2: Sufficient balance for active nodes only
-        if (activeTotal <= availableBalance && activeTotal > 0) {
-            // Keep all active rewards, drop inactive
-            return desiredAmounts.onlyActiveNodeRewards();
+        // Case 2: Sufficient balance for active nodes, partially fund inactive with the remainder
+        if (availableBalance > activeTotal && activeTotal > 0) {
+            final long inactiveBudget = Math.min(availableBalance - activeTotal, inactiveTotal);
+            return desiredAmounts.withCappedInactiveRewards(inactiveBudget);
         }
 
-        // Case 3: Insufficient balance even for active nodes
-        final var constrainedAmounts = new NodeRewardAmounts(payerId);
+        // Case 3: Insufficient balance even for active nodes — divide equally among active nodes.
+        // Drops inactive nodes rewards.
         if (activeTotal > 0) {
+            final var constrainedAmounts = new NodeRewardAmounts(payerId);
             final var activeNodeCount = countActiveNodes(desiredAmounts);
             if (activeNodeCount > 0) {
                 final long perNodeAmount = availableBalance / activeNodeCount;
-                log.info(
-                        "Balance insufficient for all, rewarding active nodes only: {} tinybars each",
-                        perNodeAmount);
+                log.info("Balance insufficient for all, rewarding active nodes only: {} tinybars each", perNodeAmount);
                 distributeEquallyAmongActiveNodes(desiredAmounts, constrainedAmounts, perNodeAmount);
             }
+            return constrainedAmounts;
         }
 
-        return constrainedAmounts;
+        // Case 4: No active nodes — divide balance equally among inactive nodes
+        final long inactiveBudget = Math.min(availableBalance, inactiveTotal);
+        return desiredAmounts.withCappedInactiveRewards(inactiveBudget);
     }
 
     /**
@@ -582,7 +584,6 @@ public class NodeRewardManager {
         final long minTinycents = Math.max(0L, usdAsTinycents);
         return exchangeRateManager.getTinybarsFromTinycents(minTinycents, now);
     }
-
 
     /**
      * Counts the number of unique active nodes with rewards.

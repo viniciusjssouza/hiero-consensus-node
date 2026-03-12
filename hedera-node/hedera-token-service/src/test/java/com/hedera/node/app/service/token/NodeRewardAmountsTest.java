@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /*
  * Copyright (C) 2025 The Hiero Authors
  *
@@ -16,6 +17,7 @@
 
 package com.hedera.node.app.service.token;
 
+import static com.hedera.hapi.util.HapiUtils.ACCOUNT_ID_COMPARATOR;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -24,23 +26,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.hedera.hapi.node.base.AccountAmount;
 import com.hedera.hapi.node.base.AccountID;
 import com.hedera.hapi.node.base.TransferList;
+import java.util.ArrayList;
 import java.util.Objects;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class NodeRewardAmountsTest {
-    private static final AccountID PAYER_ID = AccountID.newBuilder()
-            .accountNum(800L)
-            .build();
-    private static final AccountID NODE_1_ACCOUNT = AccountID.newBuilder()
-            .accountNum(1001L)
-            .build();
-    private static final AccountID NODE_2_ACCOUNT = AccountID.newBuilder()
-            .accountNum(1002L)
-            .build();
-    private static final AccountID NODE_3_ACCOUNT = AccountID.newBuilder()
-            .accountNum(1003L)
-            .build();
+    private static final AccountID PAYER_ID =
+            AccountID.newBuilder().accountNum(800L).build();
+    private static final AccountID NODE_1_ACCOUNT =
+            AccountID.newBuilder().accountNum(1001L).build();
+    private static final AccountID NODE_2_ACCOUNT =
+            AccountID.newBuilder().accountNum(1002L).build();
+    private static final AccountID NODE_3_ACCOUNT =
+            AccountID.newBuilder().accountNum(1003L).build();
 
     private NodeRewardAmounts rewards;
 
@@ -101,7 +100,8 @@ class NodeRewardAmountsTest {
 
     @Test
     void addInactiveConsensusNodeRewardThrowsForNegativeAmount() {
-        assertThrows(IllegalArgumentException.class, () -> rewards.addInactiveConsensusNodeReward(1L, NODE_1_ACCOUNT, -100));
+        assertThrows(
+                IllegalArgumentException.class, () -> rewards.addInactiveConsensusNodeReward(1L, NODE_1_ACCOUNT, -100));
     }
 
     @Test
@@ -127,6 +127,41 @@ class NodeRewardAmountsTest {
         assertEquals(150L, activeOnly.activeTotalAmount());
         assertEquals(0L, activeOnly.inactiveTotalAmount());
         assertEquals(2, activeOnly.activeNodeCount());
+    }
+
+    @Test
+    void withCappedInactiveRewardsPartiallyFundsInactive() {
+        rewards.addConsensusNodeReward(1L, NODE_1_ACCOUNT, 100L);
+        rewards.addInactiveConsensusNodeReward(2L, NODE_2_ACCOUNT, 10L);
+        rewards.addInactiveConsensusNodeReward(3L, NODE_3_ACCOUNT, 10L);
+
+        // Budget of 15 for 2 inactive nodes → 15/2 = 7 each
+        final var capped = rewards.withCappedInactiveRewards(15);
+        assertEquals(100L, capped.activeTotalAmount());
+        assertEquals(14L, capped.inactiveTotalAmount()); // 7 * 2
+        assertEquals(1, capped.activeNodeCount());
+        assertEquals(2, capped.inactiveNodeCount());
+    }
+
+    @Test
+    void withCappedInactiveRewardsZeroBudgetDropsInactive() {
+        rewards.addConsensusNodeReward(1L, NODE_1_ACCOUNT, 100L);
+        rewards.addInactiveConsensusNodeReward(2L, NODE_2_ACCOUNT, 10L);
+
+        final var capped = rewards.withCappedInactiveRewards(0);
+        assertEquals(100L, capped.activeTotalAmount());
+        assertEquals(0L, capped.inactiveTotalAmount());
+        assertEquals(0, capped.inactiveNodeCount());
+    }
+
+    @Test
+    void withCappedInactiveRewardsSufficientBudgetKeepsOriginalPerNodeAmount() {
+        rewards.addInactiveConsensusNodeReward(1L, NODE_1_ACCOUNT, 10L);
+        rewards.addInactiveConsensusNodeReward(2L, NODE_2_ACCOUNT, 10L);
+
+        // Budget of 20 is exactly the total → each gets 20/2=10 (same as original)
+        final var capped = rewards.withCappedInactiveRewards(20);
+        assertEquals(20L, capped.inactiveTotalAmount());
     }
 
     @Test
@@ -273,17 +308,52 @@ class NodeRewardAmountsTest {
         // All three nodes in one group
         assertTrue(output.contains("Nodes[1, 2, 3]:"));
         // Only one active-nodes entry line (no separate Nodes[1], Nodes[2], Nodes[3] lines)
-        assertEquals(1, countOccurrences(output, "CONSENSUS_NODE=100"));
+        // If we have a single entry, the first and last indexes of it shold be the same.
+        assertEquals(output.indexOf("CONSENSUS_NODE=100"), output.lastIndexOf("CONSENSUS_NODE=100"));
     }
 
-    private static int countOccurrences(final String text, final String substring) {
-        int count = 0;
-        int index = 0;
-        while ((index = text.indexOf(substring, index)) != -1) {
-            count++;
-            index += substring.length();
-        }
-        return count;
+    /**
+     * Verifies that the transfer list generated from NodeRewardAmounts is deterministic,
+     * regardless of the order in which rewards are added.
+     */
+    @Test
+    void toTransferListIsDeterministic() {
+        final var payerId = AccountID.newBuilder().accountNum(800L).build();
+
+        // Use account IDs that might have different hash orders
+        // 1001, 1002, 1003, 1004
+        final var account1 = AccountID.newBuilder().accountNum(1001L).build();
+        final var account2 = AccountID.newBuilder().accountNum(1002L).build();
+        final var account3 = AccountID.newBuilder().accountNum(1003L).build();
+        final var account4 = AccountID.newBuilder().accountNum(1004L).build();
+
+        // Create two NodeRewardAmounts with same data but different addition order of DIFFERENT nodes
+        // (Insertion into TreeMap will still be sorted by nodeId, so this shouldn't matter for NodeRewardAmounts
+        // internal state,
+        // but we want to check if the final list is sorted by AccountID)
+
+        final var rewards1 = new NodeRewardAmounts(payerId);
+        rewards1.addConsensusNodeReward(1L, account1, 100L);
+        rewards1.addConsensusNodeReward(2L, account2, 200L);
+        rewards1.addConsensusNodeReward(3L, account3, 300L);
+        rewards1.addConsensusNodeReward(4L, account4, 400L);
+
+        final var rewards2 = new NodeRewardAmounts(payerId);
+        rewards2.addConsensusNodeReward(4L, account4, 400L);
+        rewards2.addConsensusNodeReward(3L, account3, 300L);
+        rewards2.addConsensusNodeReward(2L, account2, 200L);
+        rewards2.addConsensusNodeReward(1L, account1, 100L);
+
+        final var list1 = rewards1.toTransferList().accountAmounts();
+        final var list2 = rewards2.toTransferList().accountAmounts();
+
+        assertEquals(list1, list2, "Transfer lists should be identical regardless of addition order");
+
+        // Also verify they are sorted by AccountID
+        final var sortedList = new ArrayList<>(list1);
+        sortedList.sort((a, b) -> ACCOUNT_ID_COMPARATOR.compare(a.accountID(), b.accountID()));
+
+        assertEquals(sortedList, list1, "AccountAmounts should be sorted by AccountID for determinism");
     }
 
     private static long amountFor(final TransferList transferList, final AccountID account) {
