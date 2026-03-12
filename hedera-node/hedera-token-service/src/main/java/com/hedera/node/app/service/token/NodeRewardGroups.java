@@ -105,30 +105,8 @@ public record NodeRewardGroups(
      */
     public List<AccountID> inactiveNodeAccountIds() {
         return inactiveNodeActivities.stream()
-                .map(NodeRewardActivity::nodeId)
-                .collect(toCollection(HashSet::new));
-    }
-
-    /**
-     * Returns the set of active node account IDs.
-     *
-     * @return the set of active node account IDs.
-     */
-    public Set<AccountID> activeNodeAccountIds() {
-        return activeNodeActivities.stream()
                 .map(NodeRewardActivity::accountId)
                 .toList();
-    }
-
-    /**
-     * Returns the set of inactive node account IDs.
-     *
-     * @return the set of inactive node account IDs.
-     */
-    public Set<AccountID> inactiveNodeAccountIds() {
-        return inactiveNodeActivities.stream()
-                .map(NodeRewardActivity::accountId)
-                .collect(toCollection(HashSet::new));
     }
 
 }
