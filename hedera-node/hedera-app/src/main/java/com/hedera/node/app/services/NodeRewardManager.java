@@ -12,6 +12,7 @@ import static java.util.stream.Collectors.toMap;
 import static org.hiero.consensus.platformstate.V0540PlatformStateSchema.PLATFORM_STATE_STATE_ID;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.hedera.hapi.node.addressbook.RegisteredServiceEndpoint;
 import com.hedera.hapi.node.base.AccountID;
 import com.hedera.hapi.node.state.addressbook.RegisteredNode;
 import com.hedera.hapi.node.state.roster.RosterEntry;
@@ -22,7 +23,6 @@ import com.hedera.hapi.platform.state.PlatformState;
 import com.hedera.node.app.fees.ExchangeRateManager;
 import com.hedera.node.app.metrics.NodeMetrics;
 import com.hedera.node.app.service.addressbook.AddressBookService;
-import com.hedera.node.app.service.addressbook.ReadableRegisteredNodeStore;
 import com.hedera.node.app.service.addressbook.impl.ReadableNodeStoreImpl;
 import com.hedera.node.app.service.addressbook.impl.ReadableRegisteredNodeStoreImpl;
 import com.hedera.node.app.service.entityid.EntityIdFactory;
@@ -59,6 +59,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import org.apache.logging.log4j.LogManager;
@@ -421,11 +422,18 @@ public class NodeRewardManager {
 
         if (!activeAccounts.isEmpty()) {
             log.info("Found eligible active node accounts {}", activeAccounts);
+        } else {
+            log.info("No active node accounts found");
         }
 
         // Step 1: Add consensus rewards for active nodes (per-node amount computed inside)
         computeActiveConsensusNodeRewards(
-                nodeGroups.activeNodeActivities(), nodesConfig, now, budget.prePaidRewards(), minNodeReward, rewardAmounts);
+                nodeGroups.activeNodeActivities(),
+                nodesConfig,
+                now,
+                budget.prePaidRewards(),
+                minNodeReward,
+                rewardAmounts);
 
         // Step 2: Add block node rewards for active nodes operating a Tier 1 block node (HIP-1357)
         final var blockNodeEligibleNodeIds = findBlockNodeEligibleNodeIds(state, nodeGroups.activeNodeActivities());
@@ -483,7 +491,7 @@ public class NodeRewardManager {
      * converted from USD to tinybars using the current exchange rate.
      *
      * @param activities the active node activities to reward
-     * @param blockNodeEligibleNodeIds the set of node IDs eligible for block node rewards
+     * @param blockNodeEligibleNodeIds the set of consensus node IDs eligible for block node rewards
      * @param nodesConfig the nodes configuration
      * @param now the current consensus time (used for exchange rate conversion)
      * @param rewardAmounts the mutable reward amounts to update
@@ -495,14 +503,18 @@ public class NodeRewardManager {
             @NonNull final NodesConfig nodesConfig,
             @NonNull final Instant now,
             @NonNull final NodeRewardAmounts rewardAmounts) {
-        if (nodesConfig.targetYearlyBlockNodeRewardsUsd() <= 0 || blockNodeEligibleNodeIds.isEmpty()) {
+        if (nodesConfig.targetYearlyBlockNodeRewardsUsd() <= 0) {
+            log.info("Block node rewards are disabled; no block node rewards will be distributed");
             return;
         }
+        if (blockNodeEligibleNodeIds.isEmpty()) {
+            log.info("No block node eligible nodes found; no block node rewards will be distributed");
+        }
+        log.info("Found consensus nodes eligible to receive block node rewards: {}", blockNodeEligibleNodeIds.size());
         final var targetPayInTinycents = BigInteger.valueOf(nodesConfig.targetYearlyBlockNodeRewardsUsd())
                 .multiply(USD_TO_TINYCENTS.toBigInteger())
                 .divide(BigInteger.valueOf(nodesConfig.numPeriodsToTargetUsd()));
-        final long perNodeReward =
-                exchangeRateManager.getTinybarsFromTinycents(targetPayInTinycents.longValue(), now);
+        final long perNodeReward = exchangeRateManager.getTinybarsFromTinycents(targetPayInTinycents.longValue(), now);
         if (perNodeReward <= 0) {
             return;
         }
@@ -530,13 +542,14 @@ public class NodeRewardManager {
         final var entityCounters = new ReadableEntityIdStoreImpl(state.getReadableStates(EntityIdService.NAME));
         final var nodeStore = new ReadableNodeStoreImpl(addressBookStates, entityCounters);
         final var registeredNodeStore = new ReadableRegisteredNodeStoreImpl(addressBookStates);
-        final var eligibleNodeIds = new HashSet<Long>();
-        final var claimedBlockNodeIds = new HashSet<Long>();
+        final var eligibleNodeIds = new TreeSet<Long>(); // use a tree set for deterministic ordering
+        final var claimedBlockNodeIds = new TreeSet<Long>();
         for (final var activity : activities) {
             final var node = nodeStore.get(activity.nodeId());
             if (node == null) continue;
             for (final long registeredNodeId : node.associatedRegisteredNode()) {
                 final var registeredNode = registeredNodeStore.get(registeredNodeId);
+                // skip registered nodes that are not block nodes
                 if (registeredNode == null || !isBlockNodeType(registeredNode)) continue;
                 if (!claimedBlockNodeIds.add(registeredNodeId)) {
                     log.warn(
@@ -557,7 +570,7 @@ public class NodeRewardManager {
      * Returns {@code true} if the given registered node has at least one Block Node service endpoint.
      */
     private static boolean isBlockNodeType(@NonNull final RegisteredNode registeredNode) {
-        return registeredNode.serviceEndpoint().stream().anyMatch(endpoint -> endpoint.hasBlockNode());
+        return registeredNode.serviceEndpoint().stream().anyMatch(RegisteredServiceEndpoint::hasBlockNode);
     }
 
     /**

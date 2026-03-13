@@ -63,8 +63,7 @@ public record NodesConfig(
         long targetYearlyNodeRewardsUsd,
 
         /* Block node rewards HIP-1357 configurations */
-        @ConfigProperty(defaultValue = "0") @NetworkProperty
-        long targetYearlyBlockNodeRewardsUsd,
+        @ConfigProperty(defaultValue = "0") @NetworkProperty long targetYearlyBlockNodeRewardsUsd,
 
         @ConfigProperty(defaultValue = "365") @NetworkProperty
         long numPeriodsToTargetUsd,
